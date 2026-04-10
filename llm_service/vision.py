@@ -69,6 +69,12 @@ def encode_image(source: ImageInput, media_type: str | None = None) -> dict[str,
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
+    # PDF — must go through pdf_to_images(), not raw encode
+    if path.suffix.lower() == ".pdf":
+        page_images = pdf_to_images(path, pages=[0])
+        logger.info("encode_image: PDF auto-converted (page 0). Use pdf_to_images() for multiple pages.")
+        return encode_image(page_images[0], media_type="image/png")
+
     mt = media_type or _detect_media_type(path)
     raw = path.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
