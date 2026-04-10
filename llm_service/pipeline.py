@@ -36,17 +36,38 @@ class Step:
     """A single agent step in a pipeline.
 
     Args:
-        name: Unique identifier (used in depends_on references and results dict).
-        system: System prompt — defines this agent's role.
-        prompt: User prompt. Can contain ``{input}`` (replaced with pipeline input)
-                and ``{step_name}`` placeholders (replaced with that step's output).
-                If None, the pipeline input is used as-is.
-        output: Optional Pydantic model — if set, uses structured() instead of chat().
-        depends_on: List of step names whose results this step needs.
-        strict: Structured output strict mode (default True).
-        lenient: If True, validation errors return raw dict instead of raising.
-        overrides: Extra body-level params for this step (temperature, etc.).
-        transform: Optional post-processing function (result) -> result.
+        name: Unique identifier. Used in ``depends_on`` references, ``result.output(name)``,
+            and ``{name}`` placeholders in other steps' prompts.
+        system: System prompt defining this agent's role/persona.
+        prompt: User prompt template. Supports placeholders:
+            ``{input}`` = original pipeline input,
+            ``{step_name}`` = output of that step (auto-serialized to JSON for Pydantic models).
+            If ``None``, the pipeline input is used as-is.
+        output: Pydantic ``BaseModel`` subclass for structured output. If ``None``,
+            the step returns plain text via ``chat()``.
+        depends_on: List of step names that must complete before this step runs.
+            Steps without dependencies run in parallel.
+        strict: Use Azure Structured Outputs for schema enforcement (default ``True``).
+        lenient: Return raw dict on validation failure instead of raising (default ``False``).
+        overrides: Per-step API param overrides (e.g. ``{"temperature": 0.2}``).
+        transform: Optional post-processing function ``(result) -> result`` applied
+            after the LLM call.
+
+    Example::
+
+        Step(
+            name="analyst",
+            system="You are a business analyst. Perform SWOT analysis.",
+            output=SwotAnalysis,
+        )
+
+        Step(
+            name="critic",
+            system="You are a critical reviewer.",
+            prompt="Review this analysis:\\n{analyst}\\n\\nOriginal doc:\\n{input}",
+            output=CriticVerdict,
+            depends_on=["analyst"],
+        )
     """
     name: str
     system: str
@@ -65,7 +86,17 @@ class Step:
 
 @dataclass
 class StepResult:
-    """Result of a single pipeline step, including trace info."""
+    """Result of a single pipeline step, including trace info.
+
+    Attributes:
+        name: Step name.
+        output: Step output — ``str``, Pydantic ``BaseModel`` instance, or ``dict``.
+        elapsed: Execution time in seconds.
+        success: ``True`` if step completed successfully.
+        error: Error message if step failed or was skipped.
+        tokens: Total tokens used by this step.
+        cost_usd: Estimated cost in USD for this step.
+    """
     name: str
     output: Any                        # str, BaseModel instance, or dict
     elapsed: float = 0.0              # seconds
@@ -91,7 +122,22 @@ class StepResult:
 
 @dataclass
 class PipelineResult:
-    """Complete pipeline execution result with all step outputs and trace."""
+    """Complete pipeline execution result with all step outputs and trace.
+
+    Attributes:
+        steps: Dict of step name to ``StepResult``.
+        elapsed: Total pipeline execution time in seconds.
+        total_tokens: Sum of tokens across all steps.
+        total_cost_usd: Sum of estimated cost across all steps.
+
+    Example::
+
+        result = await pipe.run(llm, input="...")
+        print(result.output("critic"))       # Pydantic model or str
+        print(result.total_tokens)           # 1350
+        print(result.total_cost_usd)         # 0.0054
+        print(result.trace())                # human-readable execution log
+    """
     steps: dict[str, StepResult] = field(default_factory=dict)
     elapsed: float = 0.0
 
@@ -133,21 +179,44 @@ class PipelineResult:
 class Pipeline:
     """Declarative agent chain with automatic parallelism and dependency injection.
 
-    Usage::
+    Define steps with roles, prompts, and dependencies. The pipeline
+    automatically resolves execution order (topological sort), runs
+    independent steps in parallel, and injects results into dependent steps.
+
+    Args:
+        *steps: Step instances. Order doesn't matter — execution order is
+            determined by ``depends_on`` declarations.
+
+    Raises:
+        ValueError: If a step references an unknown dependency or a cycle is detected.
+
+    Example::
+
+        from llm_service import Pipeline, Step, LLMClient, LLMConfig
 
         pipe = Pipeline(
-            Step(name="analyst", system="You are a business analyst."),
-            Step(name="lawyer",  system="You are a corporate lawyer."),
+            Step(name="analyst", system="You are a business analyst.", output=Analysis),
+            Step(name="lawyer",  system="You are a corporate lawyer.", output=LegalView),
             Step(
                 name="critic",
                 system="You are a critical reviewer.",
-                prompt="Review these analyses:\\n\\nAnalyst:\\n{analyst}\\n\\nLawyer:\\n{lawyer}",
+                prompt="Review:\\n{analyst}\\n{lawyer}\\nOriginal:\\n{input}",
+                output=Verdict,
                 depends_on=["analyst", "lawyer"],
             ),
         )
-        result = await pipe.run(llm, input="Analyze this contract: ...")
-        print(result.output("critic"))
-        print(result.trace())
+
+        cfg = LLMConfig.from_yaml("config.yaml")
+        async with LLMClient(cfg) as llm:
+            result = await pipe.run(llm, input="Proposal to acquire startup...")
+            print(result.output("critic"))
+            print(result.trace())
+
+        # Reuse on multiple documents:
+        async with LLMClient(cfg) as llm:
+            all_results = await asyncio.gather(*[
+                pipe.run(llm, input=doc) for doc in documents
+            ])
     """
 
     def __init__(self, *steps: Step) -> None:
@@ -210,9 +279,20 @@ class Pipeline:
         """Execute the full pipeline.
 
         Args:
-            client: An already-opened LLMClient (inside async with).
-            input: The base input text (available as {input} in step prompts).
-            **global_overrides: Params applied to every step (step overrides win).
+            client: An already-opened ``LLMClient`` (inside ``async with``).
+            input: The base input text, available as ``{input}`` in step prompts.
+            **global_overrides: API params applied to every step. Per-step
+                ``overrides`` take precedence over global ones.
+
+        Returns:
+            PipelineResult: Contains all step outputs, trace, and token/cost totals.
+
+        Example::
+
+            async with LLMClient(cfg) as llm:
+                result = await pipe.run(llm, input="Document text here...")
+                print(result.output("critic"))
+                print(result.trace())
         """
         t0 = time.monotonic()
         layers = self._topo_order()

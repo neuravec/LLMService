@@ -55,7 +55,33 @@ _ERROR_HINTS: dict[str, str] = {
 
 @dataclass
 class LLMError(Exception):
-    """Rich error from Azure OpenAI with actionable context."""
+    """Error from Azure OpenAI with actionable context.
+
+    Raised instead of generic exceptions — always contains structured
+    information about what went wrong and how to fix it.
+
+    Attributes:
+        message: Human-readable error description.
+        status_code: HTTP status code (e.g. 401, 429, 500). None for non-HTTP errors.
+        error_code: Azure-specific error code (e.g. ``"RateLimitExceeded"``).
+        error_type: Azure error type string.
+        model: Model name that caused the error.
+        hint: Actionable advice in Polish (auto-mapped from error code).
+        retry_attempts: How many retry attempts were made before failing.
+        retry_history: List of dicts with per-attempt details (status, elapsed, wait).
+
+    Example::
+
+        from llm_service import LLMError
+
+        try:
+            result = await llm.chat("...")
+        except LLMError as e:
+            print(e)               # multi-line formatted output
+            print(e.status_code)   # 429
+            print(e.hint)          # "Rate limit — za duzo requestow..."
+            print(e.retry_history) # [{attempt: 1, status: 429, elapsed: 1.2}, ...]
+    """
     message: str
     status_code: Optional[int] = None
     error_code: Optional[str] = None       # Azure error.code
@@ -111,7 +137,28 @@ def _get_hint(status_code: int, error_code: Optional[str]) -> Optional[str]:
 
 
 class LLMClient:
-    """High-level async client for Azure OpenAI chat completions."""
+    """Async client for Azure OpenAI chat completions.
+
+    Handles model auto-detection, structured output, vision, retries,
+    and token tracking. Use as an async context manager.
+
+    Args:
+        config: LLMConfig instance with connection details.
+
+    Attributes:
+        cfg: The LLMConfig used to create this client.
+        caps: Auto-detected ModelCapabilities for the configured model.
+        usage: UsageTracker accumulating tokens/cost across all requests in this session.
+
+    Example::
+
+        from llm_service import LLMConfig, LLMClient
+
+        cfg = LLMConfig.from_yaml("config.yaml")
+        async with LLMClient(cfg) as llm:
+            answer = await llm.chat("Hello!")
+            print(llm.usage.summary())
+    """
 
     def __init__(self, config: LLMConfig) -> None:
         self.cfg = config
@@ -162,15 +209,49 @@ class LLMClient:
         image_detail: str = "auto",
         **overrides: Any,
     ) -> str:
-        """Send a single chat completion and return the assistant text.
+        """Send a chat completion and return the assistant's text response.
 
         Args:
-            prompt: User message (ignored when *messages* is provided).
-            system: Optional system message.
-            messages: Full message list — overrides *prompt*, *system*, and *images*.
-            images: List of images (file paths, URLs, or bytes) to include.
-            image_detail: Resolution hint: "auto" | "low" | "high".
-            **overrides: Any body-level param override (temperature, etc.).
+            prompt: User message text. Ignored when ``messages`` is provided.
+            system: Optional system/developer message. Automatically uses
+                ``"developer"`` role for o-series models.
+            messages: Full message list — overrides ``prompt``, ``system``,
+                and ``images``. Use for multi-turn conversations.
+            images: List of images to include. Accepts file paths (``"scan.png"``),
+                URLs (``"https://..."``), or raw ``bytes``. See :func:`vision.encode_image`.
+            image_detail: Image resolution: ``"auto"`` (default), ``"low"``, ``"high"``.
+                Higher = more tokens but better OCR quality.
+            **overrides: Per-request overrides for any API param (``temperature``,
+                ``max_tokens``, ``response_format``, etc.). Unsupported params for
+                the current model are silently dropped.
+
+        Returns:
+            str: The assistant's response text.
+
+        Raises:
+            LLMError: On API errors, content filter, model refusal, or all retries exhausted.
+
+        Examples::
+
+            # Simple
+            answer = await llm.chat("What is Python?")
+
+            # With system prompt
+            answer = await llm.chat("Describe microservices", system="You are a senior architect.")
+
+            # With image
+            answer = await llm.chat("Describe this photo", images=["photo.jpg"])
+
+            # Multi-turn conversation
+            answer = await llm.chat("", messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi!"},
+                {"role": "assistant", "content": "Hello!"},
+                {"role": "user", "content": "What's 2+2?"},
+            ])
+
+            # Per-request override
+            answer = await llm.chat("Be creative", temperature=0.9, max_tokens=200)
         """
         msgs = messages or self._build_messages(prompt, system, images, image_detail)
         body = self._build_body(msgs, overrides)
@@ -210,7 +291,32 @@ class LLMClient:
         image_detail: str = "auto",
         **overrides: Any,
     ) -> dict[str, Any]:
-        """Like chat(), but forces JSON object output and returns parsed dict."""
+        """Send a chat completion and return parsed JSON dict.
+
+        Forces ``response_format: json_object``. Detects truncated JSON
+        (``finish_reason: length``) and raises ``LLMError`` with a hint.
+
+        Args:
+            prompt: User message. Should instruct the model to return JSON.
+            system: Optional system message.
+            images: Optional list of images (paths, URLs, bytes).
+            image_detail: Image resolution: ``"auto"`` | ``"low"`` | ``"high"``.
+            **overrides: Per-request API param overrides.
+
+        Returns:
+            dict: Parsed JSON response as a Python dictionary.
+
+        Raises:
+            LLMError: On API errors, refusal, invalid/truncated JSON.
+
+        Example::
+
+            data = await llm.chat_json(
+                "Return top 3 Polish cities as JSON with key 'cities', "
+                "each with 'name' and 'population'."
+            )
+            print(data["cities"][0]["name"])  # "Warsaw"
+        """
         from .structured import _strip_json_fences
 
         overrides.setdefault("response_format", response_format_json())
@@ -261,20 +367,48 @@ class LLMClient:
     ) -> T:
         """Send a prompt and parse the response into a Pydantic model.
 
+        The model's JSON schema is sent to Azure so the LLM is constrained
+        to produce valid output matching your Pydantic definition.
+
         Args:
-            prompt: User message.
-            model: Pydantic model class defining the expected output shape.
+            prompt: User message text.
+            model: Pydantic ``BaseModel`` subclass defining the expected output.
+                All fields should have ``Field(description="...")`` for best results.
             system: Optional system message.
-            strict: If True (default), use Azure Structured Outputs (json_schema)
-                    so the model is constrained to the schema. If False, use
-                    json_object mode + post-validation.
-            lenient: If True and validation fails, return raw dict instead of raising.
-            images: List of images to include with the prompt.
-            image_detail: Resolution hint: "auto" | "low" | "high".
-            **overrides: Body-level overrides.
+            strict: If ``True`` (default), uses Azure Structured Outputs
+                (``response_format: json_schema``) — server-side schema enforcement.
+                If ``False``, uses ``json_object`` mode + post-validation with Pydantic.
+            lenient: If ``True`` and validation fails, returns raw ``dict`` instead
+                of raising. Useful for debugging malformed LLM responses.
+            images: Optional list of images (paths, URLs, bytes).
+            image_detail: Image resolution: ``"auto"`` | ``"low"`` | ``"high"``.
+            **overrides: Per-request API param overrides.
 
         Returns:
-            Instance of *model* (or dict if lenient=True and validation fails).
+            Instance of ``model`` (e.g. ``Invoice(number="FV/001", total=1500.0)``).
+            If ``lenient=True`` and validation fails, returns a plain ``dict``.
+
+        Raises:
+            LLMError: On API errors, refusal, content filter.
+            pydantic.ValidationError: If response doesn't match schema (when ``lenient=False``).
+
+        Example::
+
+            from pydantic import BaseModel, Field
+
+            class Invoice(BaseModel):
+                number: str = Field(description="Invoice number")
+                total: float = Field(description="Gross amount")
+                currency: str = Field(description="Currency code")
+
+            invoice = await llm.structured(
+                f"Extract data from this invoice:\\n\\n{document_text}",
+                Invoice,
+                system="You extract structured data from documents.",
+            )
+            print(invoice.number)    # "FV/2026/001"
+            print(invoice.total)     # 29151.0
+            print(invoice.currency)  # "PLN"
         """
         if strict:
             overrides.setdefault("response_format", pydantic_to_json_schema(model))
@@ -297,7 +431,26 @@ class LLMClient:
     ) -> list[str]:
         """Run many prompts concurrently (bounded by semaphore).
 
-        Returns results in the same order as *prompts*.
+        All prompts share the same ``system`` and ``overrides``.
+        Concurrency is controlled by ``config.concurrency`` (default 8).
+
+        Args:
+            prompts: List of user message strings.
+            system: Optional system message applied to all prompts.
+            **overrides: Per-request API param overrides applied to all prompts.
+
+        Returns:
+            list[str]: Responses in the same order as ``prompts``.
+
+        Raises:
+            LLMError: If any individual request fails (propagated from ``chat()``).
+
+        Example::
+
+            prompts = ["What is ETL?", "What is RAG?", "What is a vector DB?"]
+            results = await llm.batch(prompts, system="Answer in 1-2 sentences.")
+            for q, a in zip(prompts, results):
+                print(f"Q: {q}\\nA: {a}")
         """
         tasks = [
             self.chat(p, system=system, **overrides)
@@ -315,7 +468,33 @@ class LLMClient:
         lenient: bool = False,
         **overrides: Any,
     ) -> list[T]:
-        """Run many prompts concurrently, each parsed into a Pydantic model."""
+        """Run many prompts concurrently, each parsed into a Pydantic model.
+
+        Combines :meth:`batch` with :meth:`structured` — runs all prompts in
+        parallel with semaphore control, returns list of Pydantic model instances.
+
+        Args:
+            prompts: List of user message strings.
+            model: Pydantic ``BaseModel`` subclass for output parsing.
+            system: Optional system message applied to all prompts.
+            strict: Use Azure Structured Outputs (default ``True``).
+            lenient: Return raw dict on validation failure (default ``False``).
+            **overrides: Per-request API param overrides.
+
+        Returns:
+            list[T]: Pydantic model instances in the same order as ``prompts``.
+
+        Example::
+
+            class Contract(BaseModel):
+                number: str = Field(description="Contract number")
+                amount: float = Field(description="Net amount")
+
+            prompts = [f"Extract from:\\n{doc}" for doc in documents]
+            contracts = await llm.batch_structured(prompts, Contract)
+            for c in contracts:
+                print(f"{c.number}: {c.amount}")
+        """
         tasks = [
             self.structured(p, model, system=system, strict=strict, lenient=lenient, **overrides)
             for p in prompts

@@ -14,10 +14,47 @@ import yaml
 
 @dataclass
 class LLMConfig:
-    """Minimal required + optional settings for Azure OpenAI calls.
+    """Configuration for Azure OpenAI API connection.
 
-    Only three fields are mandatory: api_key, endpoint, model_name.
-    Everything else has sensible defaults.
+    Only three fields are required: ``api_key``, ``endpoint``, ``model_name``.
+    Everything else is optional with sensible defaults.
+
+    Args:
+        api_key: Azure OpenAI API key. Required.
+        endpoint: Azure resource endpoint, e.g. ``"https://my-resource.openai.azure.com"``. Required.
+        model_name: Deployment name in Azure (e.g. ``"gpt-4.1"``). Required.
+        api_version: API version string. Auto-detected from model if empty.
+        temperature: Sampling temperature 0-2. Ignored for reasoning models.
+        max_tokens: Max output tokens. Sent as ``max_completion_tokens`` to Azure.
+        reasoning_effort: For reasoning models: ``"low"`` | ``"medium"`` | ``"high"``.
+            GPT-5.x also supports ``"none"`` | ``"minimal"`` | ``"xhigh"``.
+        top_p: Nucleus sampling 0-1. Ignored for reasoning models.
+        frequency_penalty: Frequency penalty -2.0 to 2.0. Ignored for reasoning models.
+        presence_penalty: Presence penalty -2.0 to 2.0. Ignored for reasoning models.
+        stop: Up to 4 stop sequences. Ignored for o3/o4-mini.
+        concurrency: Max parallel requests (semaphore size). Default ``8``.
+        timeout: Seconds per request before timeout. Default ``120``.
+        retries: Max retry attempts on transient errors. Default ``3``.
+        extra: Dict of additional params passed through to the API body
+            (e.g. ``{"seed": 42, "user": "pipeline-v2"}``).
+
+    Examples:
+        From YAML file::
+
+            cfg = LLMConfig.from_yaml("config.yaml")
+
+        From code::
+
+            cfg = LLMConfig(
+                api_key=os.environ["AZURE_OPENAI_KEY"],
+                endpoint="https://my-resource.openai.azure.com",
+                model_name="gpt-4.1",
+                temperature=0.3,
+            )
+
+        From dict (e.g. loaded from JSON)::
+
+            cfg = LLMConfig.from_dict({"api_key": "...", "endpoint": "...", "model_name": "gpt-4.1"})
     """
 
     # --- required ---
@@ -44,9 +81,28 @@ class LLMConfig:
     def from_yaml(cls, path: str | Path) -> "LLMConfig":
         """Load config from a YAML file.
 
-        The YAML can use env-var placeholders: ``${ENV_VAR}`` or
-        ``${ENV_VAR:default_value}``.
-        Unknown keys are silently ignored.
+        Supports ``${ENV_VAR}`` and ``${ENV_VAR:default}`` substitution.
+        Unknown keys in the YAML are silently ignored.
+
+        Args:
+            path: Path to the YAML config file.
+
+        Returns:
+            LLMConfig: Validated configuration instance.
+
+        Raises:
+            FileNotFoundError: If the YAML file doesn't exist.
+            TypeError: If required fields (api_key, endpoint, model_name) are missing.
+
+        Example::
+
+            # config.yaml:
+            # api_key: ${AZURE_OPENAI_KEY}
+            # endpoint: https://my-resource.openai.azure.com
+            # model_name: gpt-4.1
+            # temperature: 0.3
+
+            cfg = LLMConfig.from_yaml("config.yaml")
         """
         text = Path(path).read_text(encoding="utf-8")
         text = _resolve_env_vars(text)
@@ -55,6 +111,22 @@ class LLMConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "LLMConfig":
+        """Create config from a dictionary. Unknown keys are silently ignored.
+
+        Args:
+            d: Dictionary with config values.
+
+        Returns:
+            LLMConfig: Validated configuration instance.
+
+        Example::
+
+            cfg = LLMConfig.from_dict({
+                "api_key": "sk-...",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "model_name": "gpt-4.1",
+            })
+        """
         return cls(**_filter_known_fields(cls, d))
 
 

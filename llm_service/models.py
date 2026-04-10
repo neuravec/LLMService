@@ -14,7 +14,15 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """What a given model family supports."""
+    """Capability flags for a model family.
+
+    Attributes:
+        reasoning: If ``True``, model uses ``reasoning_effort`` instead of ``temperature``.
+        supports_temperature: If ``False``, ``temperature``/``top_p``/penalties are stripped.
+        supports_system_message: If ``False``, system messages are sent as ``"developer"`` role.
+        supports_stop: If ``False``, ``stop`` sequences are stripped from the request.
+        default_api_version: Azure API version used if not specified in config.
+    """
     reasoning: bool = False              # uses reasoning_effort instead of temperature
     supports_temperature: bool = True
     supports_system_message: bool = True
@@ -55,8 +63,29 @@ _DEFAULT = ModelCapabilities()
 
 
 def detect_capabilities(model_name: str) -> ModelCapabilities:
-    """Match *model_name* against known families. Returns safe defaults
-    for unknown models (standard, non-reasoning)."""
+    """Detect model capabilities from its name.
+
+    Matches against known model families (o-series, gpt-5.x, gpt-4.x).
+    Unknown models get safe defaults (standard, non-reasoning).
+
+    Args:
+        model_name: Azure deployment or model name (e.g. ``"gpt-4.1"``, ``"o3"``).
+
+    Returns:
+        ModelCapabilities: Frozen dataclass with capability flags.
+
+    Example::
+
+        from llm_service import detect_capabilities
+
+        caps = detect_capabilities("gpt-4.1")
+        caps.reasoning           # False
+        caps.supports_temperature  # True
+
+        caps = detect_capabilities("o4-mini")
+        caps.reasoning           # True
+        caps.supports_stop       # False
+    """
     name = model_name.lower().strip()
     for pattern, caps in _FAMILIES:
         if pattern.search(name):

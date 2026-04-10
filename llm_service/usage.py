@@ -37,8 +37,24 @@ _PRICING: dict[str, tuple[float, float]] = {
 
 
 def get_pricing(model_name: str) -> Optional[tuple[float, float]]:
-    """Look up (input_per_1m, output_per_1m) for a model.
-    Tries exact match first, then prefix match."""
+    """Look up token pricing for a model.
+
+    Tries exact match first, then longest prefix match (e.g.
+    ``"gpt-4.1-2025-04-14"`` matches ``"gpt-4.1"``).
+
+    Args:
+        model_name: Azure deployment / model name.
+
+    Returns:
+        Tuple of ``(input_usd_per_1m, output_usd_per_1m)`` or ``None`` if unknown.
+
+    Example::
+
+        from llm_service import get_pricing
+
+        inp, out = get_pricing("gpt-4.1")  # (2.0, 8.0)
+        cost = (1000 * inp + 500 * out) / 1_000_000  # $0.006
+    """
     name = model_name.lower().strip()
     if name in _PRICING:
         return _PRICING[name]
@@ -55,7 +71,17 @@ def get_pricing(model_name: str) -> Optional[tuple[float, float]]:
 
 @dataclass(frozen=True)
 class RequestUsage:
-    """Token usage for a single API call."""
+    """Token usage snapshot for a single API call.
+
+    Attributes:
+        prompt_tokens: Tokens in the prompt (input).
+        completion_tokens: Tokens in the response (output), including reasoning tokens.
+        total_tokens: ``prompt_tokens + completion_tokens``.
+        reasoning_tokens: Hidden thinking tokens used by reasoning models (o-series, gpt-5.x).
+            Included in ``completion_tokens`` count and billed as output tokens.
+        cached_prompt_tokens: Prompt tokens served from Azure's prompt cache (lower cost).
+        cost_usd: Estimated cost in USD based on built-in pricing table. ``None`` if model unknown.
+    """
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -102,8 +128,36 @@ class RequestUsage:
 
 @dataclass
 class UsageTracker:
-    """Accumulates token usage across multiple requests.
-    Thread-safe (asyncio.gather schedules on one thread, but just in case)."""
+    """Cumulative token usage tracker across an LLMClient session.
+
+    Thread-safe. Automatically updated after every successful API call.
+    Access via ``llm.usage``.
+
+    Attributes:
+        prompt_tokens: Total prompt (input) tokens.
+        completion_tokens: Total completion (output) tokens.
+        total_tokens: ``prompt_tokens + completion_tokens``.
+        reasoning_tokens: Total hidden reasoning tokens (o-series, gpt-5.x).
+        cached_prompt_tokens: Total prompt tokens served from cache.
+        cost_usd: Estimated total cost in USD.
+        request_count: Number of successful API calls.
+
+    Example::
+
+        async with LLMClient(cfg) as llm:
+            await llm.batch(["Q1", "Q2", "Q3"])
+
+            print(llm.usage.summary())
+            # Requests: 3
+            # Tokens:   450 (prompt: 120, completion: 330)
+            # Cost:     $0.0036 USD
+
+            print(llm.usage.total_tokens)   # 450
+            print(llm.usage.cost_usd)       # 0.0036
+            print(llm.usage.request_count)  # 3
+
+            llm.usage.reset()  # zero out counters
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0

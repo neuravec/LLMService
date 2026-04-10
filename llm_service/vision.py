@@ -19,14 +19,36 @@ ImageInput = Union[str, Path, bytes]
 
 
 def encode_image(source: ImageInput, media_type: str | None = None) -> dict[str, Any]:
-    """Convert an image source to Azure OpenAI image_url content part.
+    """Convert an image source to Azure OpenAI ``image_url`` content part.
 
     Args:
-        source: File path (str/Path), URL (str starting with http), or raw bytes.
-        media_type: MIME type override (e.g. "image/png"). Auto-detected for files.
+        source: One of:
+
+            - **File path** (``str`` or ``Path``) — auto-detects MIME type from extension,
+              reads file and encodes as base64 data URI.
+            - **URL** (``str`` starting with ``http://`` or ``https://``) — passed through as-is.
+            - **Raw bytes** — encoded as base64 with ``media_type`` (default ``image/png``).
+
+        media_type: MIME type override (e.g. ``"image/jpeg"``). Auto-detected for file paths.
 
     Returns:
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+        dict: ``{"type": "image_url", "image_url": {"url": "..."}}``.
+
+    Raises:
+        FileNotFoundError: If a file path doesn't exist.
+
+    Example::
+
+        from llm_service import encode_image
+
+        # From file
+        part = encode_image("photo.jpg")
+
+        # From URL
+        part = encode_image("https://example.com/img.png")
+
+        # From bytes
+        part = encode_image(raw_bytes, media_type="image/jpeg")
     """
     if isinstance(source, bytes):
         mt = media_type or "image/png"
@@ -55,15 +77,34 @@ def build_content_parts(
     images: list[ImageInput] | None = None,
     image_detail: str = "auto",
 ) -> str | list[dict[str, Any]]:
-    """Build the 'content' field for a user message.
+    """Build the ``content`` field for a user message.
 
-    If no images, returns plain string (cheaper, simpler).
-    If images present, returns content array with text + image_url parts.
+    If no images, returns plain string (no overhead). If images are present,
+    returns a content array with text + image_url parts.
 
     Args:
         text: The text portion of the message.
-        images: List of image sources (paths, URLs, bytes).
-        image_detail: "auto" | "low" | "high" — resolution hint for Azure.
+        images: List of image sources (file paths, URLs, or bytes).
+            ``None`` or empty list = text-only.
+        image_detail: Resolution hint for Azure vision:
+
+            - ``"auto"`` (default) — model decides based on image size.
+            - ``"low"`` — fixed 512x512, ~85 tokens. Fast and cheap.
+            - ``"high"`` — detailed crops, up to ~1105 tokens. Best for OCR.
+
+    Returns:
+        ``str`` if no images, ``list[dict]`` if images present.
+
+    Example::
+
+        from llm_service import build_content_parts
+
+        # Text only — returns plain string
+        content = build_content_parts("Hello")  # "Hello"
+
+        # With image — returns content array
+        content = build_content_parts("Describe this", images=["photo.jpg"])
+        # [{"type": "text", "text": "Describe this"}, {"type": "image_url", ...}]
     """
     if not images:
         return text
