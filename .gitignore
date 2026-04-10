@@ -1,0 +1,8 @@
+config.yaml
+*.env
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
