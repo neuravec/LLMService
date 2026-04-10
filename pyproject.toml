@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuravec-llm"
-version = "0.2.0"
+version = "0.3.0"
 description = "Async Azure OpenAI toolkit — structured output, agent pipelines, vision, token tracking"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -33,6 +33,7 @@ Homepage = "https://github.com/neuravec/LLMService"
 Repository = "https://github.com/neuravec/LLMService"
 
 [project.optional-dependencies]
+pdf = ["pymupdf>=1.24"]
 dev = ["pytest", "pytest-asyncio"]
 
 [tool.setuptools.packages.find]

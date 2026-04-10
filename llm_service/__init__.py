@@ -16,7 +16,7 @@ from .client import LLMClient, LLMError
 from .structured import parse_response, parse_response_lenient
 from .pipeline import Step, Pipeline, PipelineResult, StepResult
 from .usage import UsageTracker, RequestUsage, get_pricing
-from .vision import encode_image, build_content_parts, ImageInput
+from .vision import encode_image, build_content_parts, pdf_to_images, ImageInput
 
 __all__ = [
     "LLMConfig",
@@ -35,5 +35,6 @@ __all__ = [
     "get_pricing",
     "encode_image",
     "build_content_parts",
+    "pdf_to_images",
     "ImageInput",
 ]

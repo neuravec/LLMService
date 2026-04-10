@@ -207,6 +207,8 @@ class LLMClient:
         messages: Optional[list[dict]] = None,
         images: Optional[list[ImageInput]] = None,
         image_detail: str = "auto",
+        pdf_pages: Optional[Sequence[int]] = None,
+        pdf_dpi: int = 200,
         **overrides: Any,
     ) -> str:
         """Send a chat completion and return the assistant's text response.
@@ -217,10 +219,14 @@ class LLMClient:
                 ``"developer"`` role for o-series models.
             messages: Full message list — overrides ``prompt``, ``system``,
                 and ``images``. Use for multi-turn conversations.
-            images: List of images to include. Accepts file paths (``"scan.png"``),
-                URLs (``"https://..."``), or raw ``bytes``. See :func:`vision.encode_image`.
+            images: List of images or PDFs to include. Accepts file paths
+                (``"scan.png"``, ``"invoice.pdf"``), URLs (``"https://..."``),
+                or raw ``bytes``. PDFs are auto-detected by ``.pdf`` extension
+                and rendered to page images.
             image_detail: Image resolution: ``"auto"`` (default), ``"low"``, ``"high"``.
                 Higher = more tokens but better OCR quality.
+            pdf_pages: Which PDF pages to render (0-based list). ``None`` = all pages.
+            pdf_dpi: DPI for PDF rendering. Default ``200``. Use ``300`` for small text.
             **overrides: Per-request overrides for any API param (``temperature``,
                 ``max_tokens``, ``response_format``, etc.). Unsupported params for
                 the current model are silently dropped.
@@ -236,24 +242,25 @@ class LLMClient:
             # Simple
             answer = await llm.chat("What is Python?")
 
-            # With system prompt
-            answer = await llm.chat("Describe microservices", system="You are a senior architect.")
-
             # With image
             answer = await llm.chat("Describe this photo", images=["photo.jpg"])
 
-            # Multi-turn conversation
-            answer = await llm.chat("", messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hi!"},
-                {"role": "assistant", "content": "Hello!"},
-                {"role": "user", "content": "What's 2+2?"},
-            ])
+            # With PDF (all pages)
+            answer = await llm.chat("Summarize this document", images=["report.pdf"])
+
+            # PDF — first page only, high quality OCR
+            answer = await llm.chat(
+                "Extract data from this invoice",
+                images=["invoice.pdf"],
+                pdf_pages=[0],
+                pdf_dpi=300,
+                image_detail="high",
+            )
 
             # Per-request override
             answer = await llm.chat("Be creative", temperature=0.9, max_tokens=200)
         """
-        msgs = messages or self._build_messages(prompt, system, images, image_detail)
+        msgs = messages or self._build_messages(prompt, system, images, image_detail, pdf_pages, pdf_dpi)
         body = self._build_body(msgs, overrides)
         data = await self._post(body)
 
@@ -289,6 +296,8 @@ class LLMClient:
         system: Optional[str] = None,
         images: Optional[list[ImageInput]] = None,
         image_detail: str = "auto",
+        pdf_pages: Optional[Sequence[int]] = None,
+        pdf_dpi: int = 200,
         **overrides: Any,
     ) -> dict[str, Any]:
         """Send a chat completion and return parsed JSON dict.
@@ -299,8 +308,10 @@ class LLMClient:
         Args:
             prompt: User message. Should instruct the model to return JSON.
             system: Optional system message.
-            images: Optional list of images (paths, URLs, bytes).
+            images: Optional list of images or PDFs (paths, URLs, bytes).
             image_detail: Image resolution: ``"auto"`` | ``"low"`` | ``"high"``.
+            pdf_pages: Which PDF pages to render (0-based). ``None`` = all.
+            pdf_dpi: DPI for PDF rendering. Default ``200``.
             **overrides: Per-request API param overrides.
 
         Returns:
@@ -320,8 +331,7 @@ class LLMClient:
         from .structured import _strip_json_fences
 
         overrides.setdefault("response_format", response_format_json())
-        # We need finish_reason to detect truncation — call _post directly
-        msgs = self._build_messages(prompt, system, images, image_detail)
+        msgs = self._build_messages(prompt, system, images, image_detail, pdf_pages, pdf_dpi)
         body = self._build_body(msgs, overrides)
         data = await self._post(body)
 
@@ -363,6 +373,8 @@ class LLMClient:
         lenient: bool = False,
         images: Optional[list[ImageInput]] = None,
         image_detail: str = "auto",
+        pdf_pages: Optional[Sequence[int]] = None,
+        pdf_dpi: int = 200,
         **overrides: Any,
     ) -> T:
         """Send a prompt and parse the response into a Pydantic model.
@@ -417,7 +429,7 @@ class LLMClient:
             schema_hint = f"Respond with JSON matching this schema:\n{model.model_json_schema()}"
             system = f"{system}\n\n{schema_hint}" if system else schema_hint
 
-        raw = await self.chat(prompt, system=system, images=images, image_detail=image_detail, **overrides)
+        raw = await self.chat(prompt, system=system, images=images, image_detail=image_detail, pdf_pages=pdf_pages, pdf_dpi=pdf_dpi, **overrides)
         if lenient:
             return parse_response_lenient(raw, model)
         return parse_response(raw, model)
@@ -522,6 +534,8 @@ class LLMClient:
         system: Optional[str],
         images: Optional[list[ImageInput]] = None,
         image_detail: str = "auto",
+        pdf_pages: Optional[Sequence[int]] = None,
+        pdf_dpi: int = 200,
     ) -> list[dict]:
         msgs: list[dict] = []
         if system:
@@ -530,7 +544,7 @@ class LLMClient:
             else:
                 msgs.append({"role": "developer", "content": system})
 
-        content = build_content_parts(prompt, images, image_detail)
+        content = build_content_parts(prompt, images, image_detail, pdf_pages, pdf_dpi)
         msgs.append({"role": "user", "content": content})
         return msgs
 
