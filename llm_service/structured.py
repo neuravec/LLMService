@@ -95,9 +95,14 @@ def _strip_json_fences(text: str) -> str:
 def _enforce_strict(schema: dict) -> None:
     """Recursively set additionalProperties: false and make all props required.
     This is needed for Azure Structured Outputs strict mode."""
-    if schema.get("type") == "object" and "properties" in schema:
+    if schema.get("type") == "object":
         schema["additionalProperties"] = False
-        schema.setdefault("required", list(schema["properties"].keys()))
+        if "properties" in schema:
+            schema.setdefault("required", list(schema["properties"].keys()))
+        else:
+            # Bare dict → add empty properties so Azure accepts it
+            schema["properties"] = {}
+            schema["required"] = []
     # Recurse into nested schemas
     for key in ("properties", "$defs"):
         container = schema.get(key, {})
