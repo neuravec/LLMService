@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuravec-llm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Async Azure OpenAI toolkit — structured output, agent pipelines, vision, token tracking"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [{name = "neuravec"}]
 keywords = ["azure", "openai", "llm", "async", "pydantic", "structured-output"]
